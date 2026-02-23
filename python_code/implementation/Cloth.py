@@ -841,7 +841,7 @@ class Cloth:
             dlt_phi = self.solveLCP(max_iters)
             phi += dlt_phi
             #apply friction if needed
-            if self.mu_self > 0:
+            if self.mu_self > 0 and n_iter % 3 == 0:
                 F_mu = self.computeFrictionCorrection(phi,dlt_phi)
                 phi += F_mu
             #check for possible new selfcollisions
@@ -985,7 +985,7 @@ class Cloth:
 
     @profile
     def simulate(self, u, control):
-        #current position of the cloth for self-collisions
+        #current position of the cloth 
         phi0 = self.positions.reshape((3*self.n_verts,),order = 'F')
 
         #process the control inputs
@@ -1011,11 +1011,12 @@ class Cloth:
             #stretching
             phi, lambda_str, error_str = self.projectConstraints(self.stretch,phi,u,control,
                                                                 lambda_str,self.str,
-                                                                update_chol,0,0)    
- 
-            #control constraints
-            phi = self.projectControl(phi,u_mat,control,n_ctr)
+                                                                update_chol,0,0)   
+            
 
+            #control constraints
+            #phi = self.projectControl(phi,u_mat,control,n_ctr)
+            
             #self-collisions
             phi = self.selfCollisions(phi,n_iter); 
 
