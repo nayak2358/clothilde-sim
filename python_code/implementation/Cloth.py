@@ -790,7 +790,7 @@ class Cloth:
         #mass inverses: set controled to zero
         w = self.m_inv.copy(); w[self.control] = 0
         wa  = (avg*w)[:,np.newaxis]      
-        rads = self.rads[self.ind_slf]       
+        rads = self.rads[self.ind_slf]      
 
         #initial impulses
         num = -self.vals_slf[self.ind_slf]; 
@@ -841,7 +841,7 @@ class Cloth:
             dlt_phi = self.solveLCP(max_iters)
             phi += dlt_phi
             #apply friction if needed
-            if self.mu_self > 0 and n_iter % 3 == 0:
+            if self.mu_self > 0 and n_iter < 5:
                 F_mu = self.computeFrictionCorrection(phi,dlt_phi)
                 phi += F_mu
             #check for possible new selfcollisions
@@ -1022,6 +1022,8 @@ class Cloth:
 
             #iteration count 
             n_iter += 1
+
+            #print(n_iter,error_shr,error_str)
 
         #floor collisions
         phi = self.floorCollisions(phi)
