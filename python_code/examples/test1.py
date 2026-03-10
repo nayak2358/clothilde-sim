@@ -9,7 +9,8 @@ np.set_printoptions(threshold=sys.maxsize)
 import time
 
 # Caida libre
-na = 23; nb = 18
+na = 20; nb = 30
+# na = 4; nb = 7
 np.random.seed(1)
 X, T = createRectangularMesh(a = 0.5, b = 0.8, na = na, nb = nb, h = 0.2)
 X[:,2] += 0.7; 
