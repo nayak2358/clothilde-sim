@@ -14,6 +14,9 @@ X, T = createRectangularMesh(a=2, b=1, na=3, nb=2, h=0.5)
 # rect x in [-2/2, 2/2] and y in [-1/2, 1/2]
 # number of nodes = 3 * 2 = 6
 # number of quads = (3-1) * (2-1) = 2
+# X[:,2] += 0.7; 
+# X += 0.0001*np.random.randn(X.shape[0],3) 
+
 
 print(f'\n X = {X}')
 print(f'\n T = {T}')
