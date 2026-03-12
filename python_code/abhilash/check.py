@@ -15,7 +15,5 @@ X, T = createRectangularMesh(a=2, b=1, na=3, nb=2, h=0.5)
 # number of nodes = 3 * 2 = 6
 # number of quads = (3-1) * (2-1) = 2
 
-print("X =")
-print(X)
-print("\nT =")
-print(T)
+print(f'\n X = {X}')
+print(f'\n T = {T}')

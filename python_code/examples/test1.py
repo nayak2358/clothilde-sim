@@ -9,7 +9,7 @@ np.set_printoptions(threshold=sys.maxsize)
 import time
 
 # Caida libre
-na = 23; nb = 18
+na = 20; nb = 30
 np.random.seed(1)
 X, T = createRectangularMesh(a = 0.5, b = 0.8, na = na, nb = nb, h = 0.2)
 X[:,2] += 0.7; 
@@ -32,7 +32,6 @@ for i in range(tf):
 
 print('Time:',time.time()-start_time)
 print('Average iterations',self.total_iters/(len(self.history_pos)-1))
-
 
 self.makeMovie(speed = 6, repeat = True, smooth = 2)
 #self.plotMesh()
