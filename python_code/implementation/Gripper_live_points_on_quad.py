@@ -4,8 +4,10 @@
 import numpy as np
 from implementation.Cloth import Cloth
 
-triangle_edges = np.array([
-    [0,1], [1,2], [2,0]
+bbox_edges = np.array([
+    [0,1], [1,2], [2,3], [3,0],   # bottom
+    [4,5], [5,6], [6,7], [7,4],   # top
+    [0,4], [1,5], [2,6], [3,7],   # verticals
 ], dtype=int)
 
 def make_aabb_vertices_local(face_min, face_max):
@@ -23,43 +25,6 @@ def make_aabb_vertices_local(face_min, face_max):
         [xmin, ymax, zmax],
     ], dtype=float)
 
-def tri_aabb_overlaps_box(tri_pts_local, half):
-    tri_pts_local = np.asarray(tri_pts_local, dtype=float).reshape(3, 3)
-    half = np.asarray(half, dtype=float).reshape(3,)
-
-    tri_min = tri_pts_local.min(axis=0)
-    tri_max = tri_pts_local.max(axis=0)
-
-    overlap_x = (tri_min[0] <= half[0]) and (tri_max[0] >= -half[0])
-    overlap_y = (tri_min[1] <= half[1]) and (tri_max[1] >= -half[1])
-    overlap_z = (tri_min[2] <= half[2]) and (tri_max[2] >= -half[2])
-
-    return overlap_x and overlap_y and overlap_z
-
-def tri_overlaps_box_by_sampling(tri_pts_local, half, n_samples=4):
-    tri_pts_local = np.asarray(tri_pts_local, dtype=float).reshape(3, 3)
-    half = np.asarray(half, dtype=float).reshape(3,)
-
-    def inside_box(x):
-        return (
-            (abs(x[0]) <= half[0]) and
-            (abs(x[1]) <= half[1]) and
-            (abs(x[2]) <= half[2])
-        )
-
-    # Barycentric sampling of points in the triangle
-    N = int(n_samples) # (N + 1) * (N + 2) / 2 sampled points
-    for i in range(N + 1):
-        for j in range(N + 1 - i):
-            a = i / N
-            b = j / N
-            c = 1.0 - a - b
-            x = a * tri_pts_local[0] + b * tri_pts_local[1] + c * tri_pts_local[2]
-            if inside_box(x):
-                return True
-
-    return False
-
 # =========================
 # Quaternion utilities
 # =========================
@@ -72,6 +37,7 @@ def quat_conjugate(q):
     q = np.array(q, dtype=float).reshape(4,)
     return np.array([q[0], -q[1], -q[2], -q[3]], dtype=float)
 
+
 def quat_mul(q1, q2):
     q1 = np.array(q1, dtype=float).reshape(4,)
     q2 = np.array(q2, dtype=float).reshape(4,)
@@ -83,6 +49,7 @@ def quat_mul(q1, q2):
         w1*y2 - x1*z2 + y1*w2 + z1*x2,
         w1*z2 + x1*y2 - y1*x2 + z1*w2
     ], dtype=float)
+
 
 def quat_from_axis_angle(axis, angle):
     axis = np.array(axis, dtype=float).reshape(3,)
@@ -162,9 +129,11 @@ class SimulateGripper:
         self.visible_history = [True]
         self.grasp_history = [False]
 
-        # traingles to plot
-        self.debug_hit_tri_local = np.zeros((0, 3), dtype=float)
-        self.debug_hit_tri_edges = np.zeros((0, 2), dtype=int)
+        # squeeze attributes
+        self.local_points_rest = np.zeros((0, 3), dtype=float)
+        self.local_points_goal = np.zeros((0, 3), dtype=float)
+        self.squeeze_alpha = 0.0 # changed to 0
+        self.squeeze_alpha_step = 0.15   # smaller = safer
 
     def set_pose(self, q=None, p=None):
         if q is None:
@@ -174,6 +143,8 @@ class SimulateGripper:
 
         self.q = quat_normalize(q)
         self.p = np.array(p, dtype=float).reshape(3,)
+
+# quad center in grasp box OR quad center near to grasp box origin
 
     def find_nodes_in_vicinity(self, smooth=2, box=None, center_local=None):
         if box is None:
@@ -185,8 +156,7 @@ class SimulateGripper:
         center_local = np.asarray(center_local, dtype=float).reshape(3,)
         half = 0.5 * box
 
-        # transform all cloth vertices to gripper-local coords
-        #  and shift so the grasp box center is at the local origin
+    ## nodes: Take the smoothed ones rather than the actual ones
         phi_mat = self.cloth.positions
         phi_all = self.cloth.Am @ phi_mat
         for _ in range(smooth):
@@ -194,112 +164,69 @@ class SimulateGripper:
 
         n_nodes = self.cloth.positions.shape[0]
         Xw_nodes = phi_all[:n_nodes]
+
+        # Xw_nodes = self.cloth.positions
         Xl_nodes = quat_inverse_transform_points(self.p, self.q, Xw_nodes)
         Xc_nodes = Xl_nodes - center_local.reshape(1, 3)
 
-        # nodes inside the box
+        # inside nodes is an array of booleans [False, True, False, ...]
         inside_nodes = (
             (np.abs(Xc_nodes[:, 0]) <= half[0]) &
             (np.abs(Xc_nodes[:, 1]) <= half[1]) &
             (np.abs(Xc_nodes[:, 2]) <= half[2])
         )
+
         support = set(np.where(inside_nodes)[0].tolist())
 
-        # -----------------------------------------
-        # 4-triangle test per quad:
-        #   (v0,v1,c), (v1,v2,c), (v2,v3,c), (v3,v0,c)
-        # If a subtriangle overlaps the grasp box,
-        # grasp the corresponding outer edge nodes.
-        # -----------------------------------------
-        F = self.cloth.faces          # (n_faces, 4)
-        Xf = Xc_nodes[F]              # (n_faces, 4, 3), shifted local coords
-        Xc_face = Xf.mean(axis=1)     # (n_faces, 3), quad center in shifted local coords
+    ## If quad center lies in the grasp box, select all four nodes
 
-        candidate_faces = []
-        candidate_edge_supports = []
+        face_nodes = self.cloth.faces
+        # Xw_face_centers = phi_all[n_nodes:]
+        Xw_face_centers = Xw_nodes[face_nodes].mean(axis=1)
 
-        hit_tri_local = []
-        hit_tri_edges = []
-        hit_counter = 0
+        # quad centers in local frame
+        Xl_face_centers = quat_inverse_transform_points(self.p, self.q, Xw_face_centers)
+        Xc_face_centers = Xl_face_centers - center_local.reshape(1, 3)
 
-        for face_id in range(F.shape[0]):
-            q0, q1, q2, q3 = Xf[face_id]
-            c = Xc_face[face_id]
+        inside_face_nodes = (
+                (np.abs(Xc_face_centers[:, 0]) <= half[0]) &
+                (np.abs(Xc_face_centers[:, 1]) <= half[1]) &
+                (np.abs(Xc_face_centers[:, 2]) <= half[2])
+            )
+        
+        support_face_nodes = np.where(inside_face_nodes)[0]
 
-            # 4 subtriangles around quad center
-            subtris = [
-                (np.array([q0, q1, c], dtype=float), [F[face_id, 0], F[face_id, 1]]),
-                (np.array([q1, q2, c], dtype=float), [F[face_id, 1], F[face_id, 2]]),
-                (np.array([q2, q3, c], dtype=float), [F[face_id, 2], F[face_id, 3]]),
-                (np.array([q3, q0, c], dtype=float), [F[face_id, 3], F[face_id, 0]]),
-            ]
-
-            edge_support = set()
-
-            for tri_pts, edge_nodes in subtris:
-
-                # # convert triangle to world for plotting
-                # tri_world = quat_transform_points(
-                #     np.asarray(self.p, dtype=float),
-                #     quat_normalize(self.q),
-                #     tri_local
-                # )
-                
-                ## points on the traingle
-                hit = tri_overlaps_box_by_sampling(tri_pts, half, n_samples=4)
-                ## AABB of the triangle
-                # hit = tri_aabb_overlaps_box(tri_pts, half)
-                if hit:
-                    edge_support.update(edge_nodes)   
-
-                    # convert shifted-local triangle back to true gripper-local
-                    tri_local = tri_pts + center_local.reshape(1, 3)             
-
-                    # store only overlapping triangles separately
-                    hit_tri_local.append(tri_local)
-                    hit_tri_edges.append(np.array([
-                        [3 * hit_counter + 0, 3 * hit_counter + 1],
-                        [3 * hit_counter + 1, 3 * hit_counter + 2],
-                        [3 * hit_counter + 2, 3 * hit_counter + 0],
-                    ], dtype=int))
-                    hit_counter += 1
-
-            if len(edge_support) > 0:
-                candidate_faces.append(face_id)
-                candidate_edge_supports.append(sorted(edge_support))
-
-        # among candidate quads only, choose the one whose center
-        # is closest to the grasp-box center (which is local origin after shifting)
-        if len(candidate_faces) > 0:
-            cand = np.array(candidate_faces, dtype=int)
-            d2 = np.sum(Xc_face[cand]**2, axis=1)
-            k = int(np.argmin(d2))
-
-            # grasp only the nodes belonging to overlapping outer edges
-            support.update(candidate_edge_supports[k])
-
-        if len(hit_tri_local) > 0:
-            self.debug_hit_tri_local = np.vstack(hit_tri_local)
-            self.debug_hit_tri_edges = np.vstack(hit_tri_edges)
-        else:
-            self.debug_hit_tri_local = np.zeros((0, 3), dtype=float)
-            self.debug_hit_tri_edges = np.zeros((0, 2), dtype=int)
-
-        return [int(i) for i in sorted(support)]  
-
-    def get_debug_hit_triangles_world(self):
-        if self.debug_hit_tri_local.shape[0] == 0:
-            return (
-                np.zeros((0, 3), dtype=float),
-                np.zeros((0, 2), dtype=int)
+        if support_face_nodes.size > 0:
+            # add individual nodes as int
+            support.update(
+                int(i) for i in np.unique(face_nodes[support_face_nodes].reshape(-1))
             )
 
-        pts_world = quat_transform_points(
-            np.asarray(self.p, dtype=float),
-            quat_normalize(self.q),
-            self.debug_hit_tri_local
-        )
-        return pts_world, self.debug_hit_tri_edges           
+    ## If center of an edge lies in the grasp box, select the nodes of that edge
+        
+        edge_nodes = self.cloth.edges_matrix
+        Xw_edge_centers = Xw_nodes[edge_nodes].mean(axis=1)
+
+         # quad centers in local frame
+        Xl_edge_centers = quat_inverse_transform_points(self.p, self.q, Xw_edge_centers)
+        Xc_edge_centers = Xl_edge_centers - center_local.reshape(1, 3)
+
+        inside_edge_nodes = (
+                (np.abs(Xc_edge_centers[:, 0]) <= half[0]) &
+                (np.abs(Xc_edge_centers[:, 1]) <= half[1]) &
+                (np.abs(Xc_edge_centers[:, 2]) <= half[2])
+            )
+        
+        support_edge_nodes = np.where(inside_edge_nodes)[0]
+        if support_edge_nodes.size > 0:
+            # add individual nodes as int
+            support.update(
+                int(i) for i in np.unique(edge_nodes[support_edge_nodes].reshape(-1))
+            )
+
+
+        return sorted(support)
+
     
     def set_open(self, is_open, smooth, box=None, center_local=None):
 
@@ -312,40 +239,42 @@ class SimulateGripper:
         if was_open and (not self.is_open):
             inds = self.find_nodes_in_vicinity(box=box, smooth=smooth, center_local=center_local)            
             # print(f'grasped nodes: {inds}') # only print when changing from open to closed
-
             if len(inds) > 0:
                 self.controlled = inds
                 Xw = self.cloth.positions[self.controlled].copy()
-                # self.local_points = quat_inverse_transform_points(self.p, self.q, Xw)
-                
                 Xl = quat_inverse_transform_points(self.p, self.q, Xw)
-                ## making the centroid of the quad move towards the grasp box center
-                if Xl.shape[0] == 1:
-                    Xl[0, 0] = center_local[0]
-                    Xl[0, 2] = center_local[2] + 0.001
-                    # Xl = center_local
-                else:
-                    # align patch centroid with grasp center in x
-                    Xl[:, 0] += center_local[0] - Xl[:, 0].mean()
-                    # squeeze patch inward around its centroid in x
-                    beta = 0.7   # 0 < beta < 1 ; smaller = stronger squeeze
-                    cx = Xl[:, 0].mean()
-                    Xl[:, 0] = cx + beta * (Xl[:, 0] - cx)
 
-                    Xl[:, 2] += 0.001
+                # store unsqueezed grasp points
+                self.local_points_rest = Xl.copy()
 
-                self.local_points = Xl
+                # make a safe squeezed target for ALL grasped nodes
+                Xl_goal = Xl.copy()
+
+                dx = center_local[0] - Xl_goal[:, 0]
+                dx *= 0.15                    # move only 15% toward center in gripper x
+                dx = np.clip(dx, -0.002, 0.002)  # cap to 2 mm per node
+                Xl_goal[:, 0] += dx
+
+                Xl_goal[:, 2] += 0.0002       # tiny lift to reduce sudden jump
+
+                self.local_points_goal = Xl_goal
+                self.local_points = self.local_points_rest.copy()
+                self.squeeze_alpha = 0.0
+
             else:
                 self.controlled = []
                 self.local_points = np.zeros((0, 3))
+                self.local_points_rest = np.zeros((0, 3))
+                self.local_points_goal = np.zeros((0, 3))
+                self.squeeze_alpha = 0.0 # changed to 0
 
         # closed -> open : release
         elif (not was_open) and self.is_open:
             self.controlled = []
             self.local_points = np.zeros((0, 3))
-
-            self.debug_hit_tri_local = np.zeros((0, 3), dtype=float)
-            self.debug_hit_tri_edges = np.zeros((0, 2), dtype=int)
+            self.local_points_rest = np.zeros((0, 3))
+            self.local_points_goal = np.zeros((0, 3))
+            self.squeeze_alpha = 1.0
 
     def record_history(self):
         R = quat_to_rotmat(self.q)
@@ -357,7 +286,17 @@ class SimulateGripper:
         self.grasp_history.append(grasp_now)
                 
     def step(self):
+        # step is called on every callback frame, hence the target positions for the grasped nodes
+        # are sent to the solver every frame, not once. Thus, gradual squeezing can be done
+        # to avoid sudden jumping: from local_points_rest to local_points_goal.
         if (not self.is_open) and len(self.controlled) > 0:
+            # if self.squeeze_alpha < 1.0:
+            #     self.squeeze_alpha = min(1.0, self.squeeze_alpha + self.squeeze_alpha_step)
+            #     # a = 0.15, next step, a = min(1.0, 0.15 + 0.15) = 0.30, next step, a = 0.45, ...
+            #     a = self.squeeze_alpha
+            #     # changing self.local_points every frame, even though self.controlled does not change.
+            #     self.local_points = (1.0 - a) * self.local_points_rest + a * self.local_points_goal
+
             u = quat_transform_points(self.p, self.q, self.local_points)
             self.cloth.simulate(u=u, control=self.controlled)
         else:

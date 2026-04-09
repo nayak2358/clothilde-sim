@@ -138,73 +138,9 @@ class SimulateGripper:
         self.q = quat_normalize(q)
         self.p = np.array(p, dtype=float).reshape(3,)
 
-    def find_nodes_in_vicinity(self, box=None, center_local=None):
-        if box is None:
-            box = self.box_size
-        if center_local is None:
-            center_local = np.zeros(3, dtype=float)
+## quad center in grasp box OR quad center near to grasp box origin
 
-        box = np.asarray(box, dtype=float).reshape(3,)
-        center_local = np.asarray(center_local, dtype=float).reshape(3,)
-        half = 0.5 * box
-
-        # nodes
-        Xw_nodes = self.cloth.positions
-        Xl_nodes = quat_inverse_transform_points(self.p, self.q, Xw_nodes)
-        Xc_nodes = Xl_nodes - center_local.reshape(1, 3)
-
-        # inside nodes is an array of booleans [False, True, False, ...]
-        inside_nodes = (
-            (np.abs(Xc_nodes[:, 0]) <= half[0]) &
-            (np.abs(Xc_nodes[:, 1]) <= half[1]) &
-            (np.abs(Xc_nodes[:, 2]) <= half[2])
-        )
-
-        support = set(np.where(inside_nodes)[0].tolist())
-
-        # quad centers in local frame
-        Xw_face_centers = 0.25 * (self.cloth.A2 @ self.cloth.positions)
-        Xl_face_centers = quat_inverse_transform_points(self.p, self.q, Xw_face_centers)
-        Xc_face_centers = Xl_face_centers - center_local.reshape(1, 3)
-
-        ## only accept if the quad center lies in the grasp box
-        inside_face_nodes = (
-                (np.abs(Xc_face_centers[:, 0]) <= half[0]) &
-                (np.abs(Xc_face_centers[:, 1]) <= half[1]) &
-                (np.abs(Xc_face_centers[:, 2]) <= half[2])
-            )
-        
-        support_face_nodes = np.where(inside_face_nodes)[0]
-
-        if support_face_nodes.size > 0:
-            # add individual nodes as int
-            support.update(
-                int(i) for i in np.unique(self.cloth.faces[support_face_nodes].reshape(-1))
-            )
-
-        # ## only accept this nearest quad if it is reasonably close to the grasp point
-        # ## using the half-diagonal of the grasp box as threshold
-
-        # grasp_point_world = quat_transform_points(
-        #     self.p,
-        #     self.q,
-        #     center_local.reshape(1, 3)
-        # )[0]
-
-        # d2 = np.sum((Xw_face_centers - grasp_point_world.reshape(1, 3))**2, axis=1)
-        # face_id = int(np.argmin(d2))
-        # dist = np.sqrt(d2[face_id])
-
-        # ## only accept this nearest quad if it is reasonably close to the grasp point
-        # ## using the half-diagonal of the grasp box as threshold
-        # max_dist = np.linalg.norm(half)
-
-        # if dist <= max_dist:
-        #     support.update(self.cloth.faces[face_id].tolist())
-
-        return sorted(support)
-
-    # def find_nodes_in_vicinity(self, box=None, center_local=None):
+    # def find_nodes_in_vicinity(self, smooth=2, box=None, center_local=None):
     #     if box is None:
     #         box = self.box_size
     #     if center_local is None:
@@ -214,57 +150,145 @@ class SimulateGripper:
     #     center_local = np.asarray(center_local, dtype=float).reshape(3,)
     #     half = 0.5 * box
 
-    #     # transform all cloth vertices to gripper-local coords
-    #     #  and shift so the grasp box center is at the local origin
-    #     Xw_nodes = self.cloth.positions
+    #     # nodes: Take the smoothed ones rather than the actual ones
+    #     phi_mat = self.cloth.positions
+    #     phi_all = self.cloth.Am @ phi_mat
+    #     for _ in range(smooth):
+    #         phi_all = self.cloth.S @ phi_all
+
+    #     n_nodes = self.cloth.positions.shape[0]
+    #     Xw_nodes = phi_all[:n_nodes]
+
+    #     # Xw_nodes = self.cloth.positions
     #     Xl_nodes = quat_inverse_transform_points(self.p, self.q, Xw_nodes)
     #     Xc_nodes = Xl_nodes - center_local.reshape(1, 3)
 
-    #     # nodes inside the box
+    #     # inside nodes is an array of booleans [False, True, False, ...]
     #     inside_nodes = (
     #         (np.abs(Xc_nodes[:, 0]) <= half[0]) &
     #         (np.abs(Xc_nodes[:, 1]) <= half[1]) &
     #         (np.abs(Xc_nodes[:, 2]) <= half[2])
     #     )
+
     #     support = set(np.where(inside_nodes)[0].tolist())
 
-    #     # build a bounding box around the quadrilateral 
-    #     # using the minimum and maximum of x, y, z values
-    #     F = self.cloth.faces                    # (n_faces, 4) since ech face has 4 vertices
-    #     Xf = Xc_nodes[F]                        # (n_faces, 4, 3)
+    #     # Xw_face_centers = 0.25 * (self.cloth.A2 @ self.cloth.positions)
+    #     Xw_face_centers = phi_all[n_nodes:]
 
-    #     face_min = Xf.min(axis=1)               # (n_faces, 3)
-    #     face_max = Xf.max(axis=1)               # (n_faces, 3)
+    # ## only accept if the quad center lies in the grasp box
 
-    #     # checking overlapping in each axes, and for the 3D boxes to overlap, 
-    #     # every axes must overlap.
-    #     overlaps = (
-    #         (face_min[:, 0] <=  half[0]) & (face_max[:, 0] >= -half[0]) &
-    #         (face_min[:, 1] <=  half[1]) & (face_max[:, 1] >= -half[1]) &
-    #         (face_min[:, 2] <=  half[2]) & (face_max[:, 2] >= -half[2])
-    #     )
+    #     # # quad centers in local frame
+    #     # Xl_face_centers = quat_inverse_transform_points(self.p, self.q, Xw_face_centers)
+    #     # Xc_face_centers = Xl_face_centers - center_local.reshape(1, 3)
 
-    #     candidate_faces = np.where(overlaps)[0]
+    #     # inside_face_nodes = (
+    #     #         (np.abs(Xc_face_centers[:, 0]) <= half[0]) &
+    #     #         (np.abs(Xc_face_centers[:, 1]) <= half[1]) &
+    #     #         (np.abs(Xc_face_centers[:, 2]) <= half[2])
+    #     #     )
+        
+    #     # support_face_nodes = np.where(inside_face_nodes)[0]
 
-    #     # among overlapping candidates only, pick the quadrilateral whose center
-    #     # is closest to the grasp-box center
-    #     if candidate_faces.size > 0:
-    #         face_centers_local = Xf.mean(axis=1)   # (n_faces, 3)
-    #         d2 = np.sum(face_centers_local[candidate_faces]**2, axis=1)
-    #         face_id = int(candidate_faces[np.argmin(d2)])
+    #     # if support_face_nodes.size > 0:
+    #     #     # add individual nodes as int
+    #     #     support.update(
+    #     #         int(i) for i in np.unique(self.cloth.faces[support_face_nodes].reshape(-1))
+    #     #     )
 
-    #         # add the 4 corners of that quad
-    #         support.update(F[face_id].tolist())
+    # ## only accept this nearest quad if it is reasonably close to the grasp point
+    # ## using the half-diagonal of the grasp box as threshold
+
+    #     grasp_point_world = quat_transform_points(
+    #         self.p,
+    #         self.q,
+    #         center_local.reshape(1, 3)
+    #     )[0]
+
+    #     d2 = np.sum((Xw_face_centers - grasp_point_world.reshape(1, 3))**2, axis=1)
+    #     face_id = int(np.argmin(d2))
+    #     dist = np.sqrt(d2[face_id])
+
+    #     max_dist = np.linalg.norm(half)
+
+    #     if dist <= max_dist:
+    #         support.update(self.cloth.faces[face_id].tolist())
 
     #     return sorted(support)
+
+## overlap between grasp box and AABB of quads
+    def find_nodes_in_vicinity(self, smooth=2, box=None, center_local=None):
+        if box is None:
+            box = self.box_size
+        if center_local is None:
+            center_local = np.zeros(3, dtype=float)
+
+        box = np.asarray(box, dtype=float).reshape(3,)
+        center_local = np.asarray(center_local, dtype=float).reshape(3,)
+        half = 0.5 * box
+
+        # transform all cloth vertices to gripper-local coords
+        #  and shift so the grasp box center is at the local origin
+        phi_mat = self.cloth.positions
+        phi_all = self.cloth.Am @ phi_mat
+        for _ in range(smooth):
+            phi_all = self.cloth.S @ phi_all
+
+        n_nodes = self.cloth.positions.shape[0]
+        Xw_nodes = phi_all[:n_nodes]
+        Xl_nodes = quat_inverse_transform_points(self.p, self.q, Xw_nodes)
+        Xc_nodes = Xl_nodes - center_local.reshape(1, 3)
+
+        # nodes inside the box
+        inside_nodes = (
+            (np.abs(Xc_nodes[:, 0]) <= half[0]) &
+            (np.abs(Xc_nodes[:, 1]) <= half[1]) &
+            (np.abs(Xc_nodes[:, 2]) <= half[2])
+        )
+        support = set(np.where(inside_nodes)[0].tolist())
+
+        # build a bounding box around the quadrilateral 
+        # using the minimum and maximum of x, y, z values
+        F = self.cloth.faces                    # (n_faces, 4) since ech face has 4 vertices
+        Xf = Xc_nodes[F]                        # (n_faces, 4, 3)
+
+        face_min = Xf.min(axis=1)               # (n_faces, 3)
+        face_max = Xf.max(axis=1)               # (n_faces, 3)
+
+        # checking overlapping in each axes, and for the 3D boxes to overlap, 
+        # every axes must overlap.
+        overlaps = (
+            (face_min[:, 0] <=  half[0]) & (face_max[:, 0] >= -half[0]) &
+            (face_min[:, 1] <=  half[1]) & (face_max[:, 1] >= -half[1]) &
+            (face_min[:, 2] <=  half[2]) & (face_max[:, 2] >= -half[2])
+        )
+
+        candidate_faces = np.where(overlaps)[0]
+
+        # among overlapping candidates only, pick the quadrilateral whose center
+        # is closest to the grasp-box center
+        if candidate_faces.size > 0:
+            face_centers_local = Xf.mean(axis=1)   # (n_faces, 3)
+            d2 = np.sum(face_centers_local[candidate_faces]**2, axis=1)
+            face_id = int(candidate_faces[np.argmin(d2)])
+
+            # add the 4 corners of that quad
+            support.update(F[face_id].tolist())
+
+        return sorted(support)
     
-    def get_candidate_face_bbox_curve_network(self, p, q, box_size, center_local, cloth):
+    def get_candidate_face_bbox_curve_network(self, p, q, smooth, box_size, center_local, cloth):
         box_size = np.asarray(box_size, dtype=float).reshape(3,)
         center_local = np.asarray(center_local, dtype=float).reshape(3,)
         half = 0.5 * box_size
 
         # world -> gripper local
-        Xw_nodes = cloth.positions
+        phi_mat = self.cloth.positions
+        phi_all = self.cloth.Am @ phi_mat
+        for _ in range(smooth):
+            phi_all = self.cloth.S @ phi_all
+
+        n_nodes = self.cloth.positions.shape[0]
+        Xw_nodes = phi_all[:n_nodes]
         Xl_nodes = quat_inverse_transform_points(p, q, Xw_nodes)
 
         F = cloth.faces                 # (n_faces, 4)
@@ -314,7 +338,7 @@ class SimulateGripper:
 
         return all_pts, all_edges, candidate_faces
     
-    def set_open(self, is_open, box=None, center_local=None):
+    def set_open(self, is_open, smooth, box=None, center_local=None):
 
         is_open = bool(is_open)
 
@@ -323,24 +347,38 @@ class SimulateGripper:
 
         # open -> closed : attempt grasp
         if was_open and (not self.is_open):
-            inds = self.find_nodes_in_vicinity(box=box, center_local=center_local)            
+            inds = self.find_nodes_in_vicinity(box=box, smooth=smooth, center_local=center_local)            
             # print(f'grasped nodes: {inds}') # only print when changing from open to closed
 
             if len(inds) > 0:
                 self.controlled = inds
                 Xw = self.cloth.positions[self.controlled].copy()
+
                 # self.local_points = quat_inverse_transform_points(self.p, self.q, Xw)
 
                 # the node is selected using the grasp-box center, but then it is attached using its 
                 # original local position relative to the gripper frame, so it keeps that offset when lifted; 
-                # the fix is to redefine self.local_points at grasp time so they are 
-                # centered near the jaw pinch region.
+                # the fix is to change rendering only in the zone of grasping.
                 Xl = quat_inverse_transform_points(self.p, self.q, Xw)
 
-                # snap to pinch center (if I did it in all axes, 
-                # 4 nodes could collide into one and cause problems)
-                Xl[:, 0] = center_local[0]   # between jaws
-                # Xl[:, 2] = center_local[2]   # near jaw tips
+                ## making the centroid of the quad move towards the grasp box center
+                ## squeezing mainly in x-direction because that's the direction of pinching
+                ## Xl is in the gripper frame, so it always happens wrt to the x-axis 
+                ## of the gripper
+                if Xl.shape[0] == 1:
+                    Xl[0, 0] = center_local[0]
+                    Xl[0, 2] = center_local[2] + 0.001
+                    # Xl = center_local
+                else:
+                    # align patch centroid with grasp center in x 
+                    # (this makes the new mean = center_local[0])
+                    Xl[:, 0] += center_local[0] - Xl[:, 0].mean()
+                    # squeeze patch inward around its centroid in x
+                    beta = 0.7   # 0 < beta < 1 ; smaller = stronger squeeze
+                    cx = Xl[:, 0].mean()
+                    Xl[:, 0] = cx + beta * (Xl[:, 0] - cx)
+
+                    Xl[:, 2] += 0.001
 
                 self.local_points = Xl
 

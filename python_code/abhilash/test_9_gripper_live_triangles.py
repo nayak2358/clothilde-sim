@@ -1,5 +1,5 @@
 # Gripper chooses the nodes where the grasp box overlaps with the 
-# AABB of quadrilateral grasped and selects all four nodes
+# sampled points of the traingles and selects two nodes from the edge.
 
 import sys, os
 notebook_dir = os.getcwd()
@@ -8,7 +8,7 @@ sys.path.append(parent_dir + "/python_code")
 
 from implementation.Cloth2 import Cloth
 from implementation.utils import createRectangularMesh
-from implementation.Gripper_live_BB_quad import (
+from implementation.Gripper_live_BB_triangle import (
     SimulateGripper,
     quat_from_axis_angle,
     quat_to_rotmat,
@@ -40,8 +40,7 @@ grip = SimulateGripper(cloth, box_size=np.array([0.06, 0.01, 0.015], dtype=float
 import polyscope as ps
 import polyscope.imgui as psim
 
-smooth=2 # displayed cloth surface may not be the raw vertex positions
-# Hence while grasping, the cloth might not sit between the jaws
+smooth=2
 
 # initial pose controls 
 gripper_pos = cloth.positions.mean(axis=0).copy()
@@ -171,15 +170,27 @@ ps.register_surface_mesh(
     material="wax"
 )
 
-pts_bbox, edges_bbox, candidate_faces = grip.get_candidate_face_bbox_curve_network(
-    grip.p, grip.q, smooth, grasp_box, tip_center_local, cloth
-)
+# pts_bbox, edges_bbox, candidate_faces = grip.get_candidate_face_bbox_curve_network(
+#     grip.p, grip.q, grasp_box, tip_center_local, cloth
+# )
+
+# ps.register_curve_network(
+#     "candidate_face_bboxes",
+#     pts_bbox,
+#     edges_bbox,
+#     radius=0.0005,
+#     color=[0.0, 1.0, 1.0]
+# )
+
+## initialize triangles
+
+pts_tri, edges_tri = grip.get_debug_hit_triangles_world()
 
 ps.register_curve_network(
-    "candidate_face_bboxes",
-    pts_bbox,
-    edges_bbox,
-    radius=0.0005,
+    "hit_subtriangles",
+    pts_tri,
+    edges_tri,
+    radius=0.0010,
     color=[0.0, 1.0, 1.0]
 )
 
@@ -190,7 +201,7 @@ def update_scene():
     phi_mat = cloth.positions
     phi_all = cloth.Am @ phi_mat
     for _ in range(smooth):
-        phi_all = cloth.S @ phi_all
+                phi_all = cloth.S @ phi_all
 
     # force displayed vertices at grasped nodes to match true solver nodes
     # So that the grasped node is in between the jaws
@@ -205,6 +216,7 @@ def update_scene():
     p = grip.p.copy()
 
     current_gap = jaw_gap_open if jaw_open else jaw_gap_closed
+
 
     ps.get_surface_mesh("gripper_base").update_vertex_positions(
         transform_mesh(V_base0, q, p)
@@ -238,28 +250,35 @@ def update_scene():
     pc.add_vector_quantity("y", (0.08 * R[:, 1]).reshape(1, 3), vectortype="ambient", enabled=True, color=[0.0, 1.0, 0.0])
     pc.add_vector_quantity("z", (0.08 * R[:, 2]).reshape(1, 3), vectortype="ambient", enabled=True, color=[0.0, 0.0, 1.0])
     
-    ## to plot the AABB of quads
+    ## to plot the axis of rotation
+    # angle = np.linalg.norm(rotvec)
+    # if angle < 1e-12:
+    #     axis_vis = np.array([1.0, 0.0, 0.0], dtype=float)
+    # else:
+    #     axis_vis = rotvec / angle
+    # pc.add_vector_quantity("rot_axis", (0.08 * axis_vis).reshape(1, 3), vectortype="ambient", enabled=True, color=[1.0, 1.0, 1.0])
 
-    pts_bbox, edges_bbox, candidate_faces = grip.get_candidate_face_bbox_curve_network(
-    grip.p, grip.q, smooth, grasp_box, tip_center_local, cloth)
+    ## Plotting grasped triangles
+
+    pts_tri, edges_tri = grip.get_debug_hit_triangles_world()
 
     try:
-        ps.remove_structure("candidate_face_bboxes")
+        ps.remove_structure("hit_subtriangles")
     except:
         pass
 
     ps.register_curve_network(
-        "candidate_face_bboxes",
-        pts_bbox,
-        edges_bbox,
-        radius=0.0005,
+        "hit_subtriangles",
+        pts_tri,
+        edges_tri,
+        radius=0.0010,
         color=[0.0, 1.0, 1.0]
     )
 
-#region callback
+#region callback 
 
 def callback():
-    global gripper_pos, rotvec, jaw_open, jaw_gap_open, jaw_gap_closed
+    global gripper_pos, rotvec, jaw_open, jaw_gap_open
     global tip_center_local, grasp_box, follow_enabled, smooth
     
     psim.TextUnformatted("Gripper control")
@@ -279,7 +298,7 @@ def callback():
 
     # Edge-triggered grasp/release
     # current_gap = jaw_gap_open if jaw_open else jaw_gap_closed
-    grasp_box = 0.001 * np.array([3, 30, 6], dtype=float)
+    grasp_box = 0.001 * np.array([30, 30, 6], dtype=float)
     # grasp_box = 0.001 * np.array([60, 60, 30], dtype=float)
 
     tip_center_local = 0.001 * np.array([0.0, 0.0, -49], dtype=float)
