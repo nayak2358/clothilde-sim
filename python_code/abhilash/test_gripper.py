@@ -8,7 +8,7 @@ sys.path.append(parent_dir + "/python_code")
 
 from implementation.Cloth2 import Cloth
 from implementation.utils import createRectangularMesh
-from implementation.Gripper_live_BB_quad import (
+from implementation.Gripper_live_points_on_quad import (
     SimulateGripper,
     quat_from_axis_angle,
     quat_to_rotmat,
@@ -40,7 +40,7 @@ grip = SimulateGripper(cloth, box_size=np.array([0.06, 0.01, 0.015], dtype=float
 import polyscope as ps
 import polyscope.imgui as psim
 
-smooth=2 # displayed cloth surface may not be the raw vertex positions
+smooth=0 # displayed cloth surface may not be the raw vertex positions
 # Hence while grasping, the cloth might not sit between the jaws
 
 # initial pose controls 
@@ -154,13 +154,17 @@ ps.register_surface_mesh(
 )
 
 # grasp box
-grasp_box = 0.001 * np.array([6, 30, 6], dtype=float)
+grasp_box = 0.001 * np.array([30, 30, 30], dtype=float)
 
-tip_center_local = 0.001 * np.array([0.0, 0.0, -49], dtype=float)
+tip_center_local = 0.001 * np.array([0.0, 0.0, - (52 - grasp_box[2] * 1000 / 2)], dtype=float)
+
+# grasp_box = 0.001 * np.array([6, 30, 6], dtype=float)
+# tip_center_local = 0.001 * np.array([0.0, 0.0, -49], dtype=float)
+
 # 37 - 3 + 15 mm (check CAD file)  is the distance of the jaw extensions 
 # from the origin of the gripper frame
 
-V_dbg = get_box_vertices_world_offset(grip.p, grip.q, grasp_box, tip_center_local)
+V_dbg = get_box_vertices_world_offset(p=grip.p, q=grip.q, box_size=grasp_box, center_local=tip_center_local)
 
 ps.register_surface_mesh(
     "grasp_box",
@@ -171,19 +175,12 @@ ps.register_surface_mesh(
     material="wax"
 )
 
-pts_bbox, edges_bbox, candidate_faces = grip.get_candidate_face_bbox_curve_network(
-    grip.p, grip.q, smooth, grasp_box, tip_center_local, cloth
-)
+# initialize grasped nodes
 
-ps.register_curve_network(
-    "candidate_face_bboxes",
-    pts_bbox,
-    edges_bbox,
-    radius=0.0005,
-    color=[0.0, 1.0, 1.0]
-)
+# ps.register_point_cloud("grasped_nodes", np.zeros((0,3)), radius=0.002, color=[1.0, 0.0, 0.0])
 
 #region update scene
+# only for visualization (redraw/update): also called every frame through callback
 
 def update_scene():
     # copied from Cloth.py: to update meshes
@@ -238,25 +235,21 @@ def update_scene():
     pc.add_vector_quantity("y", (0.08 * R[:, 1]).reshape(1, 3), vectortype="ambient", enabled=True, color=[0.0, 1.0, 0.0])
     pc.add_vector_quantity("z", (0.08 * R[:, 2]).reshape(1, 3), vectortype="ambient", enabled=True, color=[0.0, 0.0, 1.0])
     
-    ## to plot the AABB of quads
+    # try:
+    #     ps.remove_structure("grasped_nodes")
+    # except:
+    #     pass
 
-    pts_bbox, edges_bbox, candidate_faces = grip.get_candidate_face_bbox_curve_network(
-    grip.p, grip.q, smooth, grasp_box, tip_center_local, cloth)
+    if len(grip.controlled) > 0:
+        ps.register_point_cloud("grasped_nodes", phi_all[ctrl], radius=0.002, color=[1.0, 0.0, 0.0])
+        # ps.get_point_cloud("grasped_nodes").update_point_positions(phi_all[ctrl])
+    else:
+        ps.register_point_cloud("grasped_nodes", np.zeros((0,3)), radius=0.002, color=[1.0, 0.0, 0.0])
 
-    try:
-        ps.remove_structure("candidate_face_bboxes")
-    except:
-        pass
-
-    ps.register_curve_network(
-        "candidate_face_bboxes",
-        pts_bbox,
-        edges_bbox,
-        radius=0.0005,
-        color=[0.0, 1.0, 1.0]
-    )
 
 #region callback
+# called every frame: interactive frame loop
+# step(): one physics step per frame
 
 def callback():
     global gripper_pos, rotvec, jaw_open, jaw_gap_open, jaw_gap_closed
@@ -276,13 +269,6 @@ def callback():
     q = quat_from_rotvec(rotvec)
 
     grip.set_pose(q, gripper_pos)
-
-    # Edge-triggered grasp/release
-    # current_gap = jaw_gap_open if jaw_open else jaw_gap_closed
-    grasp_box = 0.001 * np.array([3, 30, 6], dtype=float)
-    # grasp_box = 0.001 * np.array([60, 60, 30], dtype=float)
-
-    tip_center_local = 0.001 * np.array([0.0, 0.0, -49], dtype=float)
 
     grip.set_open(is_open=jaw_open, smooth=smooth, box=grasp_box, center_local=tip_center_local)
 

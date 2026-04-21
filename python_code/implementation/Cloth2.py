@@ -668,7 +668,7 @@ class Cloth:
                    ps.clear_user_callback()
 
         ps.set_user_callback(goThroughHistory)
-        ps.show()
+        # ps.show()
         ps.clear_user_callback()
 
 
