@@ -133,7 +133,7 @@ class SimulateGripper:
         self.local_points_rest = np.zeros((0, 3), dtype=float)
         self.local_points_goal = np.zeros((0, 3), dtype=float)
         self.squeeze_alpha = 0.0 # changed to 0
-        self.squeeze_alpha_step = 0.15   # smaller = safer
+        self.squeeze_alpha_step = 0.05   # smaller = safer
 
     def set_pose(self, q=None, p=None):
         if q is None:
@@ -251,8 +251,8 @@ class SimulateGripper:
                 Xl_goal = Xl.copy()
 
                 dx = center_local[0] - Xl_goal[:, 0]
-                dx *= 0.15                    # move only 15% toward center in gripper x
-                dx = np.clip(dx, -0.002, 0.002)  # cap to 2 mm per node
+                dx *= 0.50                    # move only 15% toward center in gripper x
+                # dx = np.clip(dx, -0.002, 0.002)  # cap to 2 mm per node
                 Xl_goal[:, 0] += dx
 
                 Xl_goal[:, 2] += 0.0002       # tiny lift to reduce sudden jump
@@ -316,7 +316,7 @@ gripper-local coordinates of that material point
 at each step, enforce that material point to follow the gripper
 distribute that constraint to the 4 corner vertices using the quad shape functions
 
-This is fully aligned with your quad finite-element cloth model, 
+Taking advantage of the existing quad finite-element cloth model, 
 which already uses quad reference-element shape functions internally.
 """
         

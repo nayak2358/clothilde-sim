@@ -6,9 +6,9 @@ notebook_dir = os.getcwd()
 parent_dir = os.path.abspath(os.path.join(notebook_dir, '..'))
 sys.path.append(parent_dir + "/python_code")
 
-from implementation.Cloth2 import Cloth
+from implementation.Cloth import Cloth
 from implementation.utils import createRectangularMesh
-from implementation.Gripper_live_points_on_quad import (
+from implementation.Gripper import (
     SimulateGripper,
     quat_from_axis_angle,
     quat_to_rotmat,
@@ -21,16 +21,18 @@ import numpy as np
 import trimesh
 
 na = 20
-nb = 30
+nb = 20
 np.random.seed(1)
 
-X, T = createRectangularMesh(a=0.5, b=0.8, na=na, nb=nb, h=0.2)
+X, T = createRectangularMesh(a=0.8, b=0.8, na=na, nb=nb, h=0.2)
 X[:, 2] += 0.7
 X += 0.0001 * np.random.randn(X.shape[0], 3)
 
 cloth = Cloth(X, T)
 dt = cloth.estimateTimeStep(L=0.8)
-cloth.setSimulatorParameters(dt=dt)
+# cloth.setSimulatorParameters(dt=dt, shr=0.1 * 0.0001, str=0.001 * 0.0001)
+cloth.setSimulatorParameters(dt=1/60,sub_steps=6)
+
 # mu_s=0.45, kappa=0.1 * 0.0001 
 cloth.plotMesh()
 
@@ -40,7 +42,7 @@ grip = SimulateGripper(cloth, box_size=np.array([0.06, 0.01, 0.015], dtype=float
 import polyscope as ps
 import polyscope.imgui as psim
 
-smooth=0 # displayed cloth surface may not be the raw vertex positions
+smooth=2 # displayed cloth surface may not be the raw vertex positions
 # Hence while grasping, the cloth might not sit between the jaws
 
 # initial pose controls 
