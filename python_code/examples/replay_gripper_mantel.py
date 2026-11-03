@@ -43,7 +43,6 @@ tip_center_local = 0.001 * np.array([0.0, 0.0, - (52 - grasp_box[2] * 1000 / 2)]
 # tip_center_local = 0.001 * np.array([0.0, 0.0, 0.0], dtype=float)
 YELLOW = [186/256, 142/256, 35/256]
 
-
 # video
 repeat = False
 fps = 60

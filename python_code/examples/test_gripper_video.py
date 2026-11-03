@@ -5,9 +5,9 @@ notebook_dir = os.getcwd()
 parent_dir = os.path.abspath(os.path.join(notebook_dir, '..'))
 sys.path.append(parent_dir + "/python_code")
 CLOTHILDE_ROOT = parent_dir + "/python_code"
-EXPORT_DIR = CLOTHILDE_ROOT + "/exported_test_gripper_temp" # By keeping everything float64
-# os.makedirs(EXPORT_DIR, exist_ok=True)
-export = False
+# EXPORT_DIR = CLOTHILDE_ROOT + "/exported_test_gripper_temp" # By keeping everything float64
+# # os.makedirs(EXPORT_DIR, exist_ok=True)
+# export = False
 
 from implementation.Cloth_speed import Cloth
 from implementation.utils import createRectangularMesh

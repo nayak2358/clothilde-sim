@@ -15,7 +15,7 @@ sys.path.append(parent_dir + "/python_code")
 CLOTHILDE_ROOT = parent_dir + "/python_code"
 sys.path.append(CLOTHILDE_ROOT)
 
-EXPORT_DIR = CLOTHILDE_ROOT + "/exported_data3_binary"
+EXPORT_DIR = CLOTHILDE_ROOT + "/exported_data3_binary_temp"
 sys.path.insert(0, str(CLOTHILDE_ROOT))
 
 from implementation.Cloth_speed import Cloth
@@ -29,14 +29,14 @@ from implementation.Gripper import (
 
 smooth = 2
 # Gripper data
-show_gripper = True
+show_gripper = False
 
 # grasp box
 show_graspbox = True
 grasp_box = 0.001 * np.array([40, 40, 40], dtype=float)
 # grasp_box = 0.001 * np.array([40, 40, 40], dtype=float)
-# tip_center_local = 0.001 * np.array([0.0, 0.0, - (52 - grasp_box[2] * 1000 / 2)], dtype=float)
-tip_center_local = 0.001 * np.array([0.0, 0.0, 0.0], dtype=float)
+tip_center_local = 0.001 * np.array([0.0, 0.0, - (52 - grasp_box[2] * 1000 / 2)], dtype=float)
+# tip_center_local = 0.001 * np.array([0.0, 0.0, 0.0], dtype=float)
 
 # video
 repeat = False
@@ -77,7 +77,7 @@ if show_graspbox:
 
         V_local = V_local + c.reshape(1, 3)
         return quat_transform_points(np.asarray(p, dtype=float), quat_normalize(q), V_local)
-
+    
 #region read data
 def read_unity_binary(path):
     with open(path, "rb") as f: # rb: read binary
@@ -125,7 +125,7 @@ def read_unity_binary(path):
 
 #region define clothes
 
-X0, T0, frames, gripper_poses, jaw_status, times, params = read_unity_binary(EXPORT_DIR + "/traj_mantel_single.bin")
+X0, T0, frames, gripper_poses, jaw_status, times, params = read_unity_binary(EXPORT_DIR + "/replay_cloth.bin")
 n_frames = len(frames)
 
 print("Mesh:", X0.shape)
@@ -168,9 +168,49 @@ rec_pc = ps.register_point_cloud(
     enabled=False
 )
 
-# if show_gripper:
-p_gripper = gripper_poses[:, 0:3]
+p_gripper = gripper_poses[:, 0:3] - tip_center_local
 q_gripper = gripper_poses[:, 3:7]
+    
+#region gripper
+if show_gripper:
+    
+    YELLOW = [186/256, 142/256, 35/256]
+    jaw_gap_open = 0.0
+    jaw_gap_closed = -0.001 * (30 - 6)
+
+    def load_mesh(path):
+        m = trimesh.load_mesh(path)
+        return np.asarray(m.vertices), np.asarray(m.faces)
+
+    def transform_mesh(V_local, q, p, local_offset=np.zeros(3)):
+        V = np.asarray(V_local, dtype=float) + np.asarray(local_offset, dtype=float).reshape(1, 3)
+        return quat_transform_points(np.asarray(p, dtype=float), quat_normalize(q), V)
+
+    V_base, F_base = load_mesh("gripper_cad_files/base.stl")
+    V_left, F_left = load_mesh("gripper_cad_files/jaw_left.stl")
+    V_right, F_right = load_mesh("gripper_cad_files/jaw_right.stl")
+
+    mesh_scale = 0.001   # change to 0.001 if CAD comes in mm
+    V_base *= mesh_scale
+    V_left *= mesh_scale
+    V_right *= mesh_scale
+
+    ps.register_surface_mesh(
+        "gripper_base",
+        transform_mesh(V_base, q_gripper[0], p_gripper[0]),
+        F_base, color=YELLOW
+    )
+    ps.register_surface_mesh(
+        "gripper_left",
+        transform_mesh(V_left, q_gripper[0], p_gripper[0], local_offset=np.array([-jaw_gap_open/2, 0, 0])),
+        F_left, color=YELLOW
+    )
+    ps.register_surface_mesh(
+        "gripper_right",
+        transform_mesh(V_right, q_gripper[0], p_gripper[0], local_offset=np.array([-jaw_gap_open/2, 0, 0])),
+        F_right, color=YELLOW
+    )
+
 
 grip = SimulateGripper(cloth, box_size=grasp_box)
 
@@ -252,6 +292,19 @@ def callback():
             ps.get_surface_mesh("grasp_box").set_color([0.0, 1.0, 0.0])
         else:
             ps.get_surface_mesh("grasp_box").set_color([1.0, 0.0, 0.0])
+            
+    if show_gripper:
+        current_gap = jaw_gap_open if jaw_open else jaw_gap_closed
+
+        ps.get_surface_mesh("gripper_base").update_vertex_positions(
+            transform_mesh(V_base, q, p)
+        )
+        ps.get_surface_mesh("gripper_left").update_vertex_positions(
+            transform_mesh(V_left, q, p, local_offset=np.array([-current_gap/2, 0, 0]))
+        )
+        ps.get_surface_mesh("gripper_right").update_vertex_positions(
+            transform_mesh(V_right, q, p, local_offset=np.array([ current_gap/2, 0, 0]))
+        )
     
     grip.set_pose(q_gripper[k], p_gripper[k])
     # nodes detected when open --> close
