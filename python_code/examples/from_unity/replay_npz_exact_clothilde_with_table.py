@@ -37,7 +37,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DATA_DIR = PROJECT_ROOT / "data"
 
-NPZ_PATH = DATA_DIR / "traj_mantel.npz"
+NPZ_PATH = DATA_DIR / "traj_mantel_short.npz"
 
 SMOOTH = 2
 

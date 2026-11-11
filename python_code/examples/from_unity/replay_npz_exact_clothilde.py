@@ -27,6 +27,7 @@ import time
 
 import numpy as np
 import polyscope as ps
+import polyscope.imgui as psim
 
 import trimesh
 
@@ -40,14 +41,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DATA_DIR = PROJECT_ROOT / "data"
 
-# NPZ_PATH = DATA_DIR / "traj_mantel_short.npz"
-NPZ_PATH = DATA_DIR / "traj_cloth2.npz"
-
+NPZ_PATH = DATA_DIR / "traj_mantel_new2_smooth_cropped.npz"
+# NPZ_PATH = DATA_DIR / "traj_cloth2.npz"
 
 SMOOTH = 2
 
 SHOW_GRASP_BOXES = True
 SHOW_NODES = False
+
+SHOW_TRACE = True
 
 # Must match the Unity grasp-box dimensions if you want the box itself drawn.
 # This affects VISUALIZATION ONLY; recorded gripper poses are unchanged.
@@ -183,7 +185,6 @@ print(
 if np.min(frames[..., 2]) < GROUND_Z:
     print(
         "\nNOTE: the recorded cloth contains points below z=0. "
-        "This replay intentionally preserves them exactly."
     )
 
 
@@ -203,6 +204,10 @@ if cloth.polyscoped is False:
     cloth.preparePolyscope()
 
 cloth.label = getattr(cloth, "label", "cloth")
+
+if SHOW_TRACE:
+    ps.register_point_cloud("trace_left", p[:,0,:], radius=0.005, color=(0.0, 1.0, 1.0))
+    ps.register_point_cloud("trace_right", p[:,1,:], radius=0.005, color=(1.0, 0.4, 0.7))
 
 #region Gripper
 # =============================================================================
@@ -242,7 +247,6 @@ def grasp_box_vertices(position, quaternion):
         local,
     )
 
-
 if SHOW_GRASP_BOXES:
     ps.register_surface_mesh(
         "left_grasp_box",
@@ -273,9 +277,9 @@ def transform_mesh(V_local, q, p, local_offset=np.zeros(3)):
     V = np.asarray(V_local, dtype=float) + np.asarray(local_offset, dtype=float).reshape(1, 3)
     return quat_transform_points(np.asarray(p, dtype=float), quat_normalize(q), V)
 
-V_base0, F_base = load_mesh("gripper_cad_files/base.stl")
-V_left0, F_left = load_mesh("gripper_cad_files/jaw_left.stl")
-V_right0, F_right = load_mesh("gripper_cad_files/jaw_right.stl")
+V_base0, F_base = load_mesh(PROJECT_ROOT/"gripper_cad_files/base.stl")
+V_left0, F_left = load_mesh(PROJECT_ROOT/"gripper_cad_files/jaw_left.stl")
+V_right0, F_right = load_mesh(PROJECT_ROOT/"gripper_cad_files/jaw_right.stl")
 
 mesh_scale = 0.001   # change to 0.001 if CAD comes in mm
 V_base0 *= mesh_scale
@@ -331,7 +335,6 @@ if len(times) > 1:
     )
 else:
     default_dt = 1.0 / FIXED_FPS
-
 
 state = {
     "k": 0,
@@ -389,7 +392,6 @@ def update_frame(k):
     current_gap1 = jaw_gap_open if jaw[k, 0] else jaw_gap_closed
     current_gap2 = jaw_gap_open if jaw[k, 1] else jaw_gap_closed
 
-
     ps.get_surface_mesh("gripper_base1").update_vertex_positions(
         transform_mesh(V_base0, q[k, 0], p[k, 0])
     )
@@ -409,6 +411,8 @@ def update_frame(k):
     ps.get_surface_mesh("gripper_right2").update_vertex_positions(
         transform_mesh(V_right0, q[k, 1], p[k, 1], local_offset=np.array([ current_gap2/2, 0, 0]))
     )
+    
+    # psim.TextUnformatted(f"Unity frame number = {k}")
 
 
 # =============================================================================
@@ -420,6 +424,8 @@ def callback():
         return
 
     k = state["k"]
+    
+    psim.TextUnformatted(f"Unity frame number = {k}")
 
     if USE_RECORDED_TIMING and k > 0:
         frame_dt = float(times[k] - times[k - 1])

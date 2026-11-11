@@ -53,8 +53,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DATA_DIR = PROJECT_ROOT / "data"
 
-INPUT_BIN = DATA_DIR / "replay_mantel_short.bin"
-OUTPUT_NPZ = DATA_DIR / "traj_mantel_short.npz"
+INPUT_BIN = DATA_DIR / "replay_mantel_new2.bin"
+OUTPUT_NPZ = DATA_DIR / "traj_mantel_new2.npz"
 
 # Optional crop of the recorded motion.
 # Both indices are inclusive.

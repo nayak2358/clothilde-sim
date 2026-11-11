@@ -58,6 +58,7 @@ class Cloth:
         self.nodes = np.arange(self.n_verts) #needed for proximity detection
         self.empty = np.array([],dtype=int) #handy sometimes
         self.ni = np.repeat(np.arange(self.n_verts),self.kn)
+        self.table = False
 
         #for plotting with polyscope
         self.ps_frame = 0 #for making a movie: go through the history
@@ -151,6 +152,7 @@ class Cloth:
         self.computeEdges()
         self.buildShareEdgeMatrix()
         self.buildAdjacencyMatrices()
+        self.connectedComponents()
         self.computeBoundary()
         self.triangulateQuadMesh()
         self.prepareMatrices()
@@ -158,8 +160,93 @@ class Cloth:
         self.precomputeBoundaryBending()
 
     def checkQuadMesh(self):
-        pass
-        #TODO check that every quad mesh element is well ordered
+        """Align local xi/eta edge directions for the nodal shear stencils.
+
+        Faces must already list their vertices around the perimeter. Cyclic
+        shifts preserve geometry and winding; this does not test geometric
+        self-intersections or repair inconsistent surface normals. Raise
+        ValueError for unsupported topology, without modifying self.faces.
+        """
+        from collections import defaultdict, deque
+
+        faces = np.asarray(self.faces)
+        if faces.ndim != 2 or faces.shape[1] != 4 or len(faces) == 0:
+            raise ValueError("Expected a nonempty (n_faces, 4) quad array.")
+        if not np.issubdtype(faces.dtype, np.integer):
+            raise ValueError("Quad vertex indices must be integers.")
+        if np.any(faces < 0) or np.any(faces >= self.n_verts):
+            raise ValueError("Quad vertex indices are outside the vertex array.")
+        repeated = np.flatnonzero(np.any(np.diff(np.sort(faces, axis=1), axis=1) == 0, axis=1))
+        if len(repeated):
+            raise ValueError(f"Quad {repeated[0]} contains repeated vertices.")
+
+        # Opposite edges share an axis: edge positions 0/2 are xi, 1/3 eta.
+        # A shift by one vertex swaps these axes on that face.
+        edge_faces = defaultdict(list)
+        seen_faces = set()
+        for f, face in enumerate(faces):
+            key = tuple(sorted(face))
+            if key in seen_faces:
+                raise ValueError(f"Quad {f} duplicates another face's vertices.")
+            seen_faces.add(key)
+            for k in range(4):
+                edge = tuple(sorted((face[k], face[(k + 1) % 4])))
+                edge_faces[edge].append((f, k % 2))
+                if len(edge_faces[edge]) > 2:
+                    raise ValueError(f"Nonmanifold edge {edge}: more than two incident faces.")
+
+        adjacency = [[] for _ in faces]
+        for incident in edge_faces.values():
+            if len(incident) == 2:
+                (f, axis_f), (g, axis_g) = incident
+                swap = axis_f ^ axis_g
+                adjacency[f].append((g, swap))
+                adjacency[g].append((f, swap))
+
+        shifts = np.full(len(faces), -1, dtype=int)
+        for root in range(len(faces)):
+            if shifts[root] != -1:
+                continue
+            shifts[root] = 0
+            queue = deque([root])
+            while queue:
+                f = queue.popleft()
+                for g, swap in adjacency[f]:
+                    required = shifts[f] ^ swap
+                    if shifts[g] == -1:
+                        shifts[g] = required
+                        queue.append(g)
+                    elif shifts[g] != required:
+                        raise ValueError(
+                            f"Cannot align xi/eta directions consistently across faces {f} and {g}."
+                        )
+
+        ordered = faces.copy()
+        flip = shifts == 1
+        ordered[flip] = np.roll(ordered[flip], 1, axis=1)
+
+        # Check the nodal neighbor assumptions used by the shear stencils.
+        xi = defaultdict(set)
+        eta = defaultdict(set)
+        for a, b, c, d in ordered:
+            for i, j in ((a, b), (c, d)):
+                xi[i].add(j)
+                xi[j].add(i)
+            for i, j in ((a, d), (b, c)):
+                eta[i].add(j)
+                eta[j].add(i)
+        for vertex in xi:
+            if xi[vertex] & eta[vertex] or len(xi[vertex]) > 2 or len(eta[vertex]) > 2:
+                pass
+            """
+                raise ValueError(
+                    f"Unsupported shear neighborhood at vertex {vertex}: "
+                    f"xi={sorted(xi[vertex])}, eta={sorted(eta[vertex])}. "
+                    "Each direction needs at most two neighbors, with no overlap."
+                )
+            """
+
+        self.faces = ordered
 
     def computeEdges(self):
         if self.n_edges == 0: #only do it once
@@ -238,6 +325,15 @@ class Cloth:
         edges_bnd = self.edges_matrix[index,:] 
         self.nodes_bnd = np.unique(edges_bnd.reshape(2*edges_bnd.shape[0])) # indices of the nodes of the boundary
         self.edges_bnd = edges_bnd
+
+    def connectedComponents(self):
+        A_faces = self.A1 @ self.A1.T
+        A_faces.setdiag(0)
+        A_faces.eliminate_zeros()
+        n_comp, labels = sp.csgraph.connected_components(A_faces, directed=False)
+        self.components = [np.where(labels == k)[0] for k in range(n_comp)]
+        self.n_comps = len(self.components)
+        #print(self.n_comps)
 
     def triangulateQuadMesh(self):
         #triangulation of quad mesh
@@ -392,13 +488,30 @@ class Cloth:
 
         # Boundary bending stiffness/operator in same style as interior: Kb = Lb^T Minv Lb
         self.Kb = (Lb.T @ Minv_b @ Lb).tocsc()
-    
-    
+
     def computeStretchShear(self):
+        self.stretch = []
+        self.shear = []
+        all_corners = []
+        for comp in self.components:
+            faces_k = self.faces[comp]
+            stretch_k, shear_k, corners_k = self.computeStretchShearLocal(faces_k)
+
+            self.stretch.append(stretch_k)
+            self.shear.append(shear_k)
+            all_corners.append(corners_k)
+
+        if len(all_corners) == 0:
+            self.corners = np.zeros(0, dtype=int)
+        else:
+            self.corners = np.unique(np.concatenate(all_corners))
+    
+    
+    def computeStretchShearLocal(self,faces):
         neighs_xi = {i: set() for i in range(self.n_verts)}
         neighs_eta = {i: set() for i in range(self.n_verts)}
 
-        for face in self.faces:
+        for face in faces:
             #direction xi
             neighs_xi[face[0]].add(face[1])
             neighs_xi[face[1]].add(face[0])
@@ -412,7 +525,7 @@ class Cloth:
 
         neighs_shear = []
         corners_shear = []
-        self.corners = []
+        corners = []
         for n in range(self.n_verts):
             if len(neighs_xi[n]) == 2 and len(neighs_eta[n]) == 2:       
                 neighs_shear.append(list(neighs_xi[n]) + list(neighs_eta[n]))
@@ -422,10 +535,10 @@ class Cloth:
                 neighs_shear.append([n] + list(neighs_xi[n]) + list(neighs_eta[n]))
             elif len(neighs_xi[n]) == 1 and len(neighs_eta[n]) == 1:
                 corners_shear.append([n] + list(neighs_xi[n]) + [n] + list(neighs_eta[n]))
-                self.corners.append(n)
+                corners.append(n)
 
-        bars = np.vstack([self.faces[:,[0,1]],self.faces[:,[1,2]],
-                          self.faces[:,[2,3]],self.faces[:,[3,0]]])
+        bars = np.vstack([faces[:,[0,1]],faces[:,[1,2]],
+                          faces[:,[2,3]],faces[:,[3,0]]])
         bars = np.unique(np.sort(bars, axis = 1),axis=0)
 
         #remove constraints from the seams
@@ -433,10 +546,11 @@ class Cloth:
         shear_corners = np.array(corners_shear)
         if shear_corners.shape[0] == 0:
            shear_corners = np.zeros((0,4),dtype=int)
-
         #inititate the class    
-        self.stretch = self.Stretch(bars, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
-        self.shear = self.Shear(shear_neighs, shear_corners, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
+        stretch = self.Stretch(bars, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
+        shear = self.Shear(shear_neighs, shear_corners, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
+
+        return stretch, shear, np.array(corners, dtype=int)
 
     class Stretch:
         def __init__(self, bars, X, n_verts, m_sqrt, seams, IJKs):
@@ -701,13 +815,133 @@ class Cloth:
             print("Frame saved:", i)
 
 
+
+    def buildReducedRadiusPairs(self):
+        """
+        Return vertex pairs whose collision radius should be reduced.
+
+        Two vertices u and v are included when there are edges
+
+            (u, a) and (v, b)
+
+        such that a and b represent the same topological vertex, possibly
+        because they are connected by one or more seam constraints.
+        """
+        edges = np.asarray(self.edges_matrix, dtype=int)
+        reps = self.seam_reps
+
+        n_edges = len(edges)
+
+        # Compress arbitrary union-find representative numbers to 0, ..., n_classes-1.
+        _, class_id = np.unique(reps, return_inverse=True)
+        edge_classes = class_id[edges]  # shape: (n_edges, 2)
+
+        # Edge-to-topological-vertex-class incidence matrix.
+        #
+        # This is the seam-aware equivalent of the ordinary edge-vertex
+        # incidence matrix self.A0.
+        rows = np.repeat(np.arange(n_edges), 2)
+        cols = edge_classes.ravel()
+
+        incidence = sp.coo_matrix(
+            (
+                np.ones(2 * n_edges, dtype=np.int8),
+                (rows, cols),
+            ),
+            shape=(n_edges, edge_classes.max() + 1),
+        ).tocsr()
+
+        # An edge whose endpoints have become equivalent could insert the same
+        # class twice. Treat incidence as Boolean rather than counting twice.
+        incidence.sum_duplicates()
+        incidence.data[:] = 1
+
+        # Two edges are candidates when they touch the same topological
+        # vertex class.
+        S = incidence @ incidence.T
+        ei, ej = S.nonzero()
+
+        keep = ei < ej
+        ei = ei[keep]
+        ej = ej[keep]
+
+        e0 = edges[ei]
+        e1 = edges[ej]
+
+        r00 = reps[e0[:, 0]]
+        r01 = reps[e0[:, 1]]
+        r10 = reps[e1[:, 0]]
+        r11 = reps[e1[:, 1]]
+
+        candidate_pairs = []
+
+        # Shared endpoint/class: e0[:, 0] ~ e1[:, 0]
+        mask = r00 == r10
+        if np.any(mask):
+            candidate_pairs.append(
+                np.column_stack((e0[mask, 1], e1[mask, 1]))
+            )
+
+        # Shared endpoint/class: e0[:, 0] ~ e1[:, 1]
+        mask = r00 == r11
+        if np.any(mask):
+            candidate_pairs.append(
+                np.column_stack((e0[mask, 1], e1[mask, 0]))
+            )
+
+        # Shared endpoint/class: e0[:, 1] ~ e1[:, 0]
+        mask = r01 == r10
+        if np.any(mask):
+            candidate_pairs.append(
+                np.column_stack((e0[mask, 0], e1[mask, 1]))
+            )
+
+        # Shared endpoint/class: e0[:, 1] ~ e1[:, 1]
+        mask = r01 == r11
+        if np.any(mask):
+            candidate_pairs.append(
+                np.column_stack((e0[mask, 0], e1[mask, 0]))
+            )
+
+        if not candidate_pairs:
+            return np.empty((0, 2), dtype=int)
+
+        pairs = np.vstack(candidate_pairs)
+
+        # Canonical ordering and duplicate removal.
+        pairs = np.sort(pairs, axis=1)
+        pairs = np.unique(pairs, axis=0)
+
+        # Remove literal self-pairs.
+        pairs = pairs[pairs[:, 0] != pairs[:, 1]]
+
+        # Remove pairs that are themselves the same sewn vertex.
+        #
+        # Such vertices should normally be handled by the seam constraint and
+        # excluded entirely from self-collision.
+        pairs = pairs[
+            reps[pairs[:, 0]] != reps[pairs[:, 1]]
+        ]
+
+        # Optional but normally appropriate:
+        # remove pairs that are already topological neighbours after sewing.
+        #
+        # These pairs are usually excluded from collision detection anyway.
+        if hasattr(self, "share_edge"):
+            pairs = pairs[
+                ~self.share_edge[pairs[:, 0], pairs[:, 1]]
+            ]
+
+        return pairs
+
+
     def computeRadiouses(self):
         #lenght of edges of the quad mesh
         e0 = self.edges_matrix[:,0]; e1 = self.edges_matrix[:,1]
         longs = self.computeNorm(self.positions[e1]-self.positions[e0])
         min_l = np.min(longs); max_l = np.max(longs)
         diff_rel = np.round(100*(max_l - min_l)/min_l,3)
-        assert diff_rel <= 50, f"Relative difference between smallest and biggest edge is '{diff_rel}'% more than 50%, please re-define mesh"
+        #assert diff_rel <= 50, f"Relative difference between smallest and biggest edge is '{diff_rel}'% more than 50%, please re-define mesh"
         #take into account diagonals
         d0 = self.faces[:,0]; d1 = self.faces[:,1]; d2 = self.faces[:,2]; d3 = self.faces[:,3]; 
         diag0 = self.computeNorm(self.positions[d0]-self.positions[d2])
@@ -725,34 +959,18 @@ class Cloth:
         sum_rads0 = np.minimum(2*self.rad,0.976*diag0)
         sum_rads1 = np.minimum(2*self.rad,0.976*diag1)
         matrix_rads[d0,d2] = sum_rads0; 
+        matrix_rads[d2,d0] = sum_rads0; 
         matrix_rads[d1,d3] = sum_rads1
+        matrix_rads[d3,d1] = sum_rads1
 
         #edges that share a node
-        S = self.A0 @ self.A0.T
-        ei, ej = S.nonzero()
-        # avoids duplicates and self-pairs
-        mask = ei < ej          
-        ei = ei[mask]
-        ej = ej[mask]
-        # find endpoints that are not shared
-        e0 = self.edges_matrix[ei]
-        e1 = self.edges_matrix[ej]
-        same00 = e0[:, 0] == e1[:, 0]
-        same01 = e0[:, 0] == e1[:, 1]
-        same10 = e0[:, 1] == e1[:, 0]
-        same11 = e0[:, 1] == e1[:, 1]
-        #take the opposites
-        pairs = np.empty((len(ei), 2), dtype=self.edges_matrix.dtype)
-        pairs[same00] = np.column_stack([e0[same00, 1], e1[same00, 1]])
-        pairs[same01] = np.column_stack([e0[same01, 1], e1[same01, 0]])
-        pairs[same10] = np.column_stack([e0[same10, 0], e1[same10, 1]])
-        pairs[same11] = np.column_stack([e0[same11, 0], e1[same11, 0]])
-        #make the pair of nodes unique
-        pairs = np.sort(pairs, axis=1)
-        pairs = np.unique(pairs, axis=0)
-        #reduce their collision radious in half
-        matrix_rads[pairs[:,0],pairs[:,1]] = 0.6*matrix_rads[pairs[:,0],pairs[:,1]]
-        matrix_rads[pairs[:,1],pairs[:,0]] = 0.6*matrix_rads[pairs[:,1],pairs[:,0]]
+        pairs = self.buildReducedRadiusPairs()
+        i = pairs[:, 0]
+        j = pairs[:, 1]
+
+        matrix_rads[i, j] *= 0.66
+        matrix_rads[j, i] *= 0.66
+        
 
         #save matrix for fast indixing
         self.matrix_rads = matrix_rads
@@ -761,8 +979,8 @@ class Cloth:
     def setSimulatorParameters(self, dt = 1/60, tol = 0.0075, sub_steps = 10,
                                rho = 0.1, delta = 0.1, alpha = 0.2,
                                kappa = 0.5*1e-4, kappa_bnd = 0.05*1e-4, 
-                               str = 0.01*1e-4, shr = 10*1e-4,
-                               mu_f = 0.2, mu_s = 0.35, thck = 0.95):
+                               str = 0.01*1e-4, shr = 10*1e-4, slf = 1*1e-4,
+                               mu_f = 0.2, mu_s = 0.35, thck = 0.95, max_mov= 0.1, beta=None):
         #solver parameters
         self.frame_rate = dt #desired frame rate
         self.sub_steps = sub_steps
@@ -778,22 +996,27 @@ class Cloth:
         self.alpha = alpha # slow damping 
         self.kappa = kappa # bending stiffness
         self.kappa_bnd = kappa_bnd # bending stiffness
-        self.beta = 0.02*self.kappa # fast damping: do not change in general
+        # self.beta = 0.02*self.kappa # fast damping: do not change in general
+        self.beta = (0.02 * self.kappa if beta is None else beta) # Changed to do the 
+        # energy experiment where we want D=0.
         self.str = str/(self.dt**2) # stretch elasticity
         self.shr = shr/(self.dt**2) # shear elasticity
+        self.slf = slf/(self.dt**2) # self-collisions elasticity
         self.mu_floor = mu_f #friction with to the floor
         self.mu_self = mu_s #friction for self-collisions
 
         #self-collision parameters
         self.thck = thck
         self.mov_tol = 0.025 #when some node moves 2.5% or more than its previous position, run computeClosePairs()
+        self.max_mov = max_mov #between 0 and 1 fraction of mean edge length that the control nodes can move in one time step
         self.computeRadiouses()
         self.eps_sus = 3.3*self.rad #threshold for detecting close balls in computeClosePairs()
 
 
         #factorize implicit step matrix E for fast unconstrained step
-        D = self.alpha*self.M + self.beta*self.K 
-        K = self.kappa*self.K + self.kappa_bnd*self.Kb; M = self.rho*self.M; 
+        K = self.kappa*self.K + self.kappa_bnd*self.Kb; 
+        D = self.alpha*self.M + self.beta*K       
+        M = self.rho*self.M; 
         E = M + self.dt*D + (self.dt**2)*K 
         Et = M + 0.5*self.dt*D + 0.25*(self.dt**2)*K 
 
@@ -832,6 +1055,103 @@ class Cloth:
     def computeNorm(self,w):
         return np.sqrt(self.innerProduct(w,w))
 
+    def addTable(self,center,dimensions,mu):
+        self.table = True
+        self.mu_table = mu
+        self.table_center = np.array(center)
+        self.table_half_size = np.array(dimensions)/2
+        self.box_min = self.table_center - self.table_half_size
+        self.box_max = self.table_center + self.table_half_size
+        cx, cy, cz = self.table_center
+        hx, hy, hz = 0.95*self.table_half_size
+
+        # Vertices: 8 corners of the rectangular table box
+        self.table_vertices = np.array([
+            [cx - hx, cy - hy, cz - hz],  # 0
+            [cx + hx, cy - hy, cz - hz],  # 1
+            [cx + hx, cy + hy, cz - hz],  # 2
+            [cx - hx, cy + hy, cz - hz],  # 3
+
+            [cx - hx, cy - hy, cz + hz],  # 4
+            [cx + hx, cy - hy, cz + hz],  # 5
+            [cx + hx, cy + hy, cz + hz],  # 6
+            [cx - hx, cy + hy, cz + hz],  # 7
+        ])
+
+        # Quadrilateral faces
+        self.table_faces = np.array([
+            [0, 3, 2, 1],  # bottom
+            [7, 6, 5, 4],  # top
+
+            [0, 1, 5, 4],  # front, y-
+            [3, 7, 6, 2],  # back, y+
+
+            [0, 4, 7, 3],  # left, x-
+            [1, 2, 6, 5],  # right, x+
+        ], dtype=int)
+        if self.polyscoped is False:
+            self.preparePolyscope()
+        ps.register_surface_mesh("Table", self.table_vertices, self.table_faces, smooth_shade=True, edge_width = 1)
+
+    
+    @profile
+    def tableCollisions(self,phi):    
+        phi_mat = phi.reshape((-1, 3), order="F")
+        p = phi_mat.copy()
+
+        # Is particle center inside the box?
+        inside = np.all((p >= self.box_min) & (p <= self.box_max), axis=1)
+
+        # --------------------------------------------------
+        # Case 1: particle center is outside the box
+        # --------------------------------------------------
+        closest = np.clip(p, self.box_min, self.box_max)
+
+        direction = p - closest
+        dist = self.computeNorm(direction) 
+
+        outside_hit = (~inside) & (dist < self.rad)
+
+        if np.any(outside_hit):
+            n = direction[outside_hit] / dist[outside_hit, None]
+            p[outside_hit] = closest[outside_hit] + n * self.rad
+
+        # --------------------------------------------------
+        # Case 2: particle center is inside the box
+        # Push it to the nearest face, plus radius.
+        # --------------------------------------------------
+        if np.any(inside):
+            p_inside = p[inside]
+
+            dist_to_min = p_inside - self.box_min
+            dist_to_max = self.box_max - p_inside
+
+            distances = np.concatenate([dist_to_min, dist_to_max], axis=1)
+            closest_face = np.argmin(distances, axis=1)
+
+            corrected = p_inside.copy()
+
+            for i, face in enumerate(closest_face):
+                if face < 3:
+                    axis = face
+                    corrected[i, axis] = self.box_min[axis] - self.rad
+                else:
+                    axis = face - 3
+                    corrected[i, axis] = self.box_max[axis] + self.rad
+
+            p[inside] = corrected
+        #friction
+        dlt_phi = p - phi_mat
+        nu_mat = dlt_phi.reshape((self.n_verts, 3), order='F')
+        norm_Fn = self.computeNorm(nu_mat)
+        nu = nu_mat/(norm_Fn[:,np.newaxis] + 1e-12)
+        v = self.positions - p
+        vt = v - (self.innerProduct(v,nu)[:,np.newaxis])*nu 
+        #compute friction force vector
+        F_mu = self.frictionForce(self.mu_table,norm_Fn,vt,cap = True)
+        phi += (dlt_phi + F_mu).flatten(order="F") 
+        return phi
+
     @profile
     def floorCollisions(self,phi):
         phi_mat = phi.reshape((self.n_verts, 3), order='F').copy()
@@ -840,7 +1160,8 @@ class Cloth:
         if ind_col.shape[0] > 0:
             self.flr = True
             #normal forces
-            norm_Fn = self.nodes_faces_count[ind_col]*np.abs(phi_mat[ind_col,2]) #normal force 
+            #norm_Fn = self.nodes_faces_count[ind_col]*np.abs(phi_mat[ind_col,2]) #normal force scaled
+            norm_Fn = np.abs(phi_mat[ind_col,2]) #normal force 
             phi_mat[ind_col,2] = 0 #orthogonal projection to the floor          
             #friction
             vt = (self.positions[ind_col] - phi_mat[ind_col]) #tangent friction direction per node 
@@ -958,11 +1279,13 @@ class Cloth:
             #correction for positions
             dlt_phi = self.solveLCP(max_iters)
             
-            #lets project into stretch space
-            b = -self.stretch.grad@dlt_phi
-            dlt_lambda = self.stretch.factor(b)
-            prj_dlt_phi = dlt_phi + (self.stretch.gradT@dlt_lambda)
-            dlt_phi = 0.5*(dlt_phi + prj_dlt_phi)
+            for stretch_k in self.stretch:
+                #lets project into stretch space
+                b = -stretch_k.grad@dlt_phi
+                dlt_lambda = stretch_k.factor(b)
+                prj_dlt_phi = dlt_phi + (stretch_k.gradT@dlt_lambda)
+                dlt_phi = 0.5*(dlt_phi + prj_dlt_phi)
+                
             
             #apply friction if needed
             if self.mu_self > 0 and n_iter < 5:
@@ -977,7 +1300,7 @@ class Cloth:
     
     def buildShareEdgeMatrix(self):
         n = self.n_verts
-        # --- Union-Find over seam equivalences ---
+
         parent = np.arange(n, dtype=int)
         rank = np.zeros(n, dtype=int)
 
@@ -991,6 +1314,7 @@ class Cloth:
             ra, rb = find(a), find(b)
             if ra == rb:
                 return
+
             if rank[ra] < rank[rb]:
                 parent[ra] = rb
             elif rank[ra] > rank[rb]:
@@ -1004,23 +1328,28 @@ class Cloth:
 
         reps = np.array([find(i) for i in range(n)], dtype=int)
 
-        # group members by representative
+        # Save this: it is needed for seam-aware topology.
+        self.seam_reps = reps
+
         groups = {}
         for idx, r in enumerate(reps):
             groups.setdefault(r, []).append(idx)
 
+        self.seam_groups = groups
+
         share_edge = np.zeros((n, n), dtype=bool)
 
-        # --- (1) clique within each equivalence class ---
+        # Vertices representing the same sewn vertex.
         for members in groups.values():
             if len(members) > 1:
-                m = np.array(members, dtype=int)
+                m = np.asarray(members, dtype=int)
                 share_edge[np.ix_(m, m)] = True
 
-        # --- (2) lift real edges across equivalence classes ---
+        # Lift each real edge through the seam-equivalence classes.
         for u, v in self.edges_matrix:
-            gu = np.array(groups[reps[u]], dtype=int)
-            gv = np.array(groups[reps[v]], dtype=int)
+            gu = np.asarray(groups[reps[u]], dtype=int)
+            gv = np.asarray(groups[reps[v]], dtype=int)
+
             share_edge[np.ix_(gu, gv)] = True
             share_edge[np.ix_(gv, gu)] = True
 
@@ -1152,9 +1481,23 @@ class Cloth:
                 Ku = np.ones_like(Iu)            
             else:
                 Iu = self.empty; Ju = self.empty; Ku = self.empty
-            self.shear.update_u(Iu,Ju,Ku)
-            self.stretch.update_u(Iu,Ju,Ku)
+            for k in range(self.n_comps):
+                self.shear[k].update_u(Iu,Ju,Ku)
+                self.stretch[k].update_u(Iu,Ju,Ku)
         return U
+    
+    def limitControlVelocity(self, u_raw):
+        u_raw_mat = u_raw.reshape((len(self.control), 3), order="F")
+
+        u_used = self.positions[self.control]
+
+        du = u_raw_mat - u_used
+        dist = self.computeNorm(du)
+        scale = np.minimum(1.0, self.max_step / (dist + 1e-12))
+
+        u_clmp = u_used + scale[:, None] * du
+
+        return u_clmp.flatten(order="F")
 
 
     @profile
@@ -1171,27 +1514,38 @@ class Cloth:
             phi0 = self.positions.reshape((3*self.n_verts,),order = 'F')
 
             #interpolated control
-            u = U[s]; #u_mat = u.reshape((n_ctr,3),order='F')
+            u_raw = U[s]; #u_mat = u.reshape((n_ctr,3),order='F')
+            u = self.limitControlVelocity(u_raw)
 
             #unconstrained step to correct
             phi = self.unconstrainedStep(self.implicitEuler)
 
             #lagrange multipliers for the shear and stretch constraints
-            lambda_shr = np.zeros((self.shear.n_conds + u.shape[0] + 3*self.n_seams,)); 
-            lambda_str = np.zeros((self.stretch.n_conds + u.shape[0] + 3*self.n_seams,)); 
-
+            lambda_shr = [np.zeros((shear_k.n_conds + u.shape[0] + 3*self.n_seams,))
+                         for shear_k in self.shear
+                         ]
+            lambda_str = [np.zeros((stretch_k.n_conds + u.shape[0] + 3*self.n_seams,))
+                         for stretch_k in self.stretch
+                         ]
             #solver variables for inextensiblity 
             n_iter = 0; error_str = np.inf; error_shr = np.inf; 
 
             while (error_str > self.tol or error_shr > self.tol) and n_iter < 100: 
 
-                #shearing
-                phi, lambda_shr, error_shr = self.projectConstraints(self.shear,phi,u,control,
-                                                                    lambda_shr,self.shr,0.005,s%5)
+                #for multiple patches
+                error_shr = 0.0; error_str = 0.0
 
-                #stretching
-                phi, lambda_str, error_str = self.projectConstraints(self.stretch,phi,u,control,
-                                                                    lambda_str,self.str,0,0)   
+                for k, shear_k in enumerate(self.shear):
+                    #shearing
+                    phi, lambda_shr[k], err_k = self.projectConstraints(shear_k,phi,u,control,
+                                                                        lambda_shr[k],self.shr,0.005,s%5)
+                    error_shr = max(error_shr, err_k)
+
+                for k, stretch_k in enumerate(self.stretch):
+                    #stretching
+                    phi, lambda_str[k], err_k = self.projectConstraints(stretch_k,phi,u,control,
+                                                                        lambda_str[k],self.str,0,0)   
+                    error_str = max(error_str, err_k) 
                 
                 
                 #self-collisions
@@ -1199,7 +1553,10 @@ class Cloth:
 
                 #iteration count 
                 n_iter += 1
-            #print(n_iter)
+
+            if self.table is True:
+                phi = self.tableCollisions(phi)
+
 
             #floor collisions
             phi = self.floorCollisions(phi)
