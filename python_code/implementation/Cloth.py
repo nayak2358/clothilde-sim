@@ -11,8 +11,11 @@ from pykdtree.kdtree import KDTree
 import polyscope as ps
 from line_profiler import profile
 
+import time
+
 class Cloth:
-    def __init__(self,verts,faces,seams=[],name="clothilde"):
+    SHEAR_MODELS = {"four_point", "diagonal"}
+    def __init__(self,verts,faces,shear_model="four_point",seams=[],name="clothilde"):
         #positions and velocities
         self.positions = np.array(verts, order = 'F') #current position of the vertices of the mesh
         assert self.positions.shape[1] == 3 and self.positions.ndim == 2, 'Something is wrong with the vertices dimensions'
@@ -97,6 +100,8 @@ class Cloth:
         self.control = [] #for precomputing cholesky factorizations and only updating when necessary
         self.Iu = self.empty; self.Ju = self.empty; self.Ku = self.empty
         self.share_control = np.zeros((self.n_verts, self.n_verts), dtype=bool)
+        
+        self.shear_model = shear_model
 
         #compute all the necesary elements for simulation only once
         self.prepareSimulation()
@@ -548,8 +553,26 @@ class Cloth:
            shear_corners = np.zeros((0,4),dtype=int)
         #inititate the class    
         stretch = self.Stretch(bars, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
-        shear = self.Shear(shear_neighs, shear_corners, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
+        
+        if self.shear_model == "four_point":
+            # Proposed formulation: C_k = <x_r - x_l, x_u - x_d> - C_k^0.
+            shear = self.Shear(shear_neighs, shear_corners, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
+        elif self.shear_model == "diagonal":
+            # Two diagonal distance constraints per quadrilateral:
+            # family 0: face[0] -- face[2]
+            # family 1: face[1] -- face[3]
+            diagonal_bars = np.vstack(
+                [
+                    faces[:, [0, 2]],
+                    faces[:, [1, 3]],
+                ]
+            ).astype(int, copy=False)
+            shear = self.DiagonalShear(diagonal_bars, self.positions, self.n_verts, self.m_sqrt, self.seams, self.seams_IJK)
 
+        else:
+            raise RuntimeError(
+                f"Unsupported shear model: {self.shear_model}"
+            )
         return stretch, shear, np.array(corners, dtype=int)
 
     class Stretch:
@@ -620,9 +643,36 @@ class Cloth:
             val_s = (phi_mat[self.seams[:,0]]-phi_mat[self.seams[:,1]]).flatten(order='F')
             val = np.concatenate([val_str,val_s,val_u])
             return val
+        
+    class DiagonalShear(Stretch):
+        """Two squared-distance constraints per quadrilateral.
+           Inherited from Stretch to reuse the distances already defined there
+        """
+
+        def __init__(self, diagonals, X, n_verts, m_sqrt, seams, IJKs):
+            super().__init__(diagonals, X, n_verts, m_sqrt, seams, IJKs)
+            self.model = "diagonal"
+            # diagonal_bars were constructed as:
+            #
+            # [all face(0,2) diagonals,
+            #  all face(1,3) diagonals]
+            self.n_quad_faces = diagonals.shape[0] // 2
+            self.diagonal_family = np.concatenate(
+                [
+                    np.zeros(
+                        self.n_quad_faces,
+                        dtype=np.int8,
+                    ),
+                    np.ones(
+                        self.n_quad_faces,
+                        dtype=np.int8,
+                    ),
+                ]
+            )
 
     class Shear:
         def __init__(self, shear_neighs, shear_corners, X, n_verts, m_sqrt, seams, IJKs):
+            self.model = "four_points"
             self.n_verts = n_verts
             self.n_crn = shear_corners.shape[0]
             self.n_conds = shear_neighs.shape[0] + shear_corners.shape[0]
@@ -980,7 +1030,8 @@ class Cloth:
                                rho = 0.1, delta = 0.1, alpha = 0.2,
                                kappa = 0.5*1e-4, kappa_bnd = 0.05*1e-4, 
                                str = 0.01*1e-4, shr = 10*1e-4, slf = 1*1e-4,
-                               mu_f = 0.2, mu_s = 0.35, thck = 0.95, max_mov= 0.1, beta=None):
+                               mu_f = 0.2, mu_s = 0.35, thck = 0.95, max_mov= 0.1, 
+                               beta=None, eta_shr=0.005, shear_refresh=5):
         #solver parameters
         self.frame_rate = dt #desired frame rate
         self.sub_steps = sub_steps
@@ -1012,6 +1063,9 @@ class Cloth:
         self.computeRadiouses()
         self.eps_sus = 3.3*self.rad #threshold for detecting close balls in computeClosePairs()
 
+        # Added for shear experiments
+        self.eta_shr = float(eta_shr)
+        self.shear_refresh = int(shear_refresh)
 
         #factorize implicit step matrix E for fast unconstrained step
         K = self.kappa*self.K + self.kappa_bnd*self.Kb; 
@@ -1503,6 +1557,8 @@ class Cloth:
     @profile
     def simulate(self, u, control):
 
+        self.last_shear_time = 0.0
+        
         #process the control inputs
         U = self.processControlInputs(u,control)
 
@@ -1535,11 +1591,23 @@ class Cloth:
                 #for multiple patches
                 error_shr = 0.0; error_str = 0.0
 
+                start_shear = time.perf_counter()
+
                 for k, shear_k in enumerate(self.shear):
-                    #shearing
+                    # This preserves the current solver structure while 
+                    # making its stopping residual meaningful for both formulations:
+                    # four_point shear and diagonal shear.
+                    if shear_k.model == "four_point":
+                        # The reference scalar product can be zero.
+                        den_error = self.eta_shr
+                    else:
+                        # Reference diagonal squared lengths are positive.
+                        den_error = 0.0
                     phi, lambda_shr[k], err_k = self.projectConstraints(shear_k,phi,u,control,
-                                                                        lambda_shr[k],self.shr,0.005,s%5)
+                                                                        lambda_shr[k],self.shr,den_error,s%self.shear_refresh)
                     error_shr = max(error_shr, err_k)
+                
+                self.last_shear_time += time.perf_counter() - start_shear
 
                 for k, stretch_k in enumerate(self.stretch):
                     #stretching

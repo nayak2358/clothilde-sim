@@ -31,6 +31,7 @@ Output:
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+import shutil
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -85,6 +86,27 @@ BASE_PARAMETERS = dict(
     thck=0.95,       # unused
     max_mov=0.1,     # unused
 )
+
+def configure_latex_plots():
+    if shutil.which("latex") is None:
+        raise RuntimeError(
+            "A LaTeX installation is required to generate the figures. "
+            "Install LaTeX and make sure the `latex` command is on PATH."
+        )
+
+    plt.rcParams.update(
+        {
+            "text.usetex": True,
+            "font.family": "serif",
+            "font.serif": ["Computer Modern Roman"],
+            "text.latex.preamble": r"\usepackage{amsmath}",
+            "axes.labelsize": 11,
+            "axes.titlesize": 12,
+            "legend.fontsize": 9,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+        }
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -302,6 +324,7 @@ def plot_indices(number_of_samples: int, stride: int) -> np.ndarray:
 # -----------------------------------------------------------------------------
 
 def main() -> None:
+    configure_latex_plots()
     X, T = createRectangularMesh(
         a=1.0,
         b=1.0,
